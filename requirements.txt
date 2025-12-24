@@ -1,7 +1,5 @@
-fastapi==0.115.0
-uvicorn==0.30.6
-transformers==4.44.2
+fastapi
+uvicorn
 torch
-pillow==10.4.0
-python-multipart==0.0.9
-anyio==4.4.0
+transformers
+pillow

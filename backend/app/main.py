@@ -2,33 +2,34 @@ from __future__ import annotations
 
 import io
 import os
-import logging
 import time
 from typing import Any, Dict, Optional
 
 import anyio
-import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
-from transformers import AutoProcessor, LlavaForConditionalGeneration
+from transformers import AutoFeatureExtractor, AutoTokenizer, VisionEncoderDecoderModel
 
 from .prompts import PROMPTS, build_prompt
 
-MODEL_NAME = "fancyfeast/llama-joycaption-beta-one-hf-llava"
+# TINY MODEL MODE (MOBILE SAFE)
+# This replaces JoyCaption for Termux / CPU testing
+USE_TINY_MODEL = True
+MODEL_NAME = "nlpconnect/vit-gpt2-image-captioning"
 MAX_FILE_SIZE = 20 * 1024 * 1024
-DEFAULT_TEMPERATURE = 0.6
-DEFAULT_TOP_P = 0.9
-DEFAULT_MAX_NEW_TOKENS = 512
 REQUEST_TIMEOUT_S = 180
 
-MODEL_CACHE: Dict[str, Any] = {"model": None, "processor": None, "device": None}
+MODEL_CACHE: Dict[str, Any] = {
+    "model": None,
+    "tokenizer": None,
+    "feature_extractor": None,
+    "device": "cpu",
+}
 MODEL_LOCK = anyio.Lock()
 
 
 app = FastAPI(title="JoyCaption Beta One")
-
-logging.basicConfig(level=logging.INFO)
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,36 +46,32 @@ app.add_middleware(
 
 
 def _load_model() -> None:
-    if MODEL_NAME != "fancyfeast/llama-joycaption-beta-one-hf-llava":
-        raise RuntimeError("Only JoyCaption Beta One is supported.")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if device == "cuda" else torch.float32
-    if device == "cpu":
-        logging.warning("CUDA not available. Falling back to CPU.")
+    if not USE_TINY_MODEL:
+        raise RuntimeError("Tiny model mode disabled.")
+    if MODEL_NAME not in {
+        "nlpconnect/vit-gpt2-image-captioning",
+        "Salesforce/blip-image-captioning-base",
+        "Salesforce/blip-image-captioning-small",
+    }:
+        raise RuntimeError("Unsupported tiny model.")
 
-    processor = AutoProcessor.from_pretrained(MODEL_NAME)
-    model = LlavaForConditionalGeneration.from_pretrained(
-        MODEL_NAME,
-        torch_dtype=dtype,
-        low_cpu_mem_usage=True,
-    )
-    model.to(device)
+    model = VisionEncoderDecoderModel.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    feature_extractor = AutoFeatureExtractor.from_pretrained(MODEL_NAME)
+
+    model.to("cpu")
     model.eval()
 
     MODEL_CACHE["model"] = model
-    MODEL_CACHE["processor"] = processor
-    MODEL_CACHE["device"] = device
+    MODEL_CACHE["tokenizer"] = tokenizer
+    MODEL_CACHE["feature_extractor"] = feature_extractor
+    MODEL_CACHE["device"] = "cpu"
 
 
 def _get_model() -> Dict[str, Any]:
-    if MODEL_CACHE["model"] is None or MODEL_CACHE["processor"] is None:
+    if MODEL_CACHE["model"] is None or MODEL_CACHE["tokenizer"] is None:
         raise RuntimeError("Model not loaded")
     return MODEL_CACHE
-
-
-def _ensure_model_loaded() -> None:
-    if MODEL_CACHE["model"] is None:
-        _load_model()
 
 
 def _clean_output(text: str) -> str:
@@ -83,53 +80,22 @@ def _clean_output(text: str) -> str:
 
 def _generate_caption(
     image: Image.Image,
-    prompt: str,
-    temperature: float,
-    top_p: float,
-    max_new_tokens: int,
-    seed: Optional[int],
+    max_length: int,
+    num_beams: int,
 ) -> str:
     cache = _get_model()
     model = cache["model"]
-    processor = cache["processor"]
-    device = cache["device"]
+    tokenizer = cache["tokenizer"]
+    feature_extractor = cache["feature_extractor"]
 
-    if seed is not None:
-        torch.manual_seed(seed)
-
-    conversation = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image"},
-            ],
-        }
-    ]
-
-    prompt_text = processor.apply_chat_template(conversation, add_generation_prompt=True)
-    inputs = processor(text=[prompt_text], images=[image], return_tensors="pt")
-
-    if device == "cuda":
-        inputs = {
-            k: v.to(device=device, dtype=torch.bfloat16 if v.dtype.is_floating_point else v.dtype)
-            for k, v in inputs.items()
-        }
-    else:
-        inputs = {k: v.to(device=device) for k, v in inputs.items()}
-
-    input_len = inputs["input_ids"].shape[1]
-
+    inputs = feature_extractor(images=[image], return_tensors="pt")
+    pixel_values = inputs["pixel_values"]
     output_ids = model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        do_sample=True,
-        temperature=temperature,
-        top_p=top_p,
+        pixel_values=pixel_values,
+        max_length=max_length,
+        num_beams=num_beams,
     )
-
-    generated = output_ids[:, input_len:]
-    text = processor.batch_decode(generated, skip_special_tokens=True)[0]
+    text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
     return _clean_output(text)
 
 
@@ -146,8 +112,9 @@ async def startup_event() -> None:
 async def health() -> Dict[str, Any]:
     return {
         "status": "ok",
-        "model_loaded": MODEL_CACHE["model"] is not None,
-        "device": MODEL_CACHE["device"] or ("cuda" if torch.cuda.is_available() else "cpu"),
+        "model": "vit-gpt2-image-captioning",
+        "device": "cpu",
+        "tiny_mode": True,
     }
 
 
@@ -159,9 +126,9 @@ async def caption_image(
     length: Optional[str] = Form(None),
     word_count: Optional[int] = Form(None),
     seed: Optional[int] = Form(None),
-    temperature: float = Form(DEFAULT_TEMPERATURE),
-    top_p: float = Form(DEFAULT_TOP_P),
-    max_new_tokens: int = Form(DEFAULT_MAX_NEW_TOKENS),
+    temperature: Optional[float] = Form(None),
+    top_p: Optional[float] = Form(None),
+    max_new_tokens: Optional[int] = Form(None),
 ) -> Dict[str, Any]:
     if mode not in PROMPTS:
         raise HTTPException(status_code=400, detail="Unsupported mode")
@@ -171,12 +138,6 @@ async def caption_image(
         raise HTTPException(status_code=400, detail="Invalid length")
     if word_count is not None and (word_count <= 0 or word_count > 500):
         raise HTTPException(status_code=400, detail="Invalid word_count")
-    if temperature <= 0 or temperature > 2:
-        raise HTTPException(status_code=400, detail="Invalid temperature")
-    if top_p <= 0 or top_p > 1:
-        raise HTTPException(status_code=400, detail="Invalid top_p")
-    if max_new_tokens <= 0 or max_new_tokens > 1024:
-        raise HTTPException(status_code=400, detail="Invalid max_new_tokens")
 
     data = await image.read()
     if len(data) > MAX_FILE_SIZE:
@@ -199,11 +160,8 @@ async def caption_image(
             caption = await anyio.to_thread.run_sync(
                 _generate_caption,
                 pil_image,
-                prompt,
-                float(temperature),
-                float(top_p),
-                int(max_new_tokens),
-                seed,
+                64,
+                4,
             )
     except RuntimeError as exc:
         if "out of memory" in str(exc).lower():
@@ -227,51 +185,3 @@ async def caption_image(
         },
         "timing_ms": timing_ms,
     }
-
-
-@app.post("/api/caption/batch")
-async def caption_batch(
-    images: list[UploadFile] = File(...),
-    mode: str = Form(...),
-    tone: Optional[str] = Form(None),
-    length: Optional[str] = Form(None),
-    word_count: Optional[int] = Form(None),
-    temperature: float = Form(DEFAULT_TEMPERATURE),
-    top_p: float = Form(DEFAULT_TOP_P),
-    max_new_tokens: int = Form(DEFAULT_MAX_NEW_TOKENS),
-) -> Dict[str, Any]:
-    results = []
-    for upload in images:
-        data = await upload.read()
-        if len(data) > MAX_FILE_SIZE:
-            results.append({"filename": upload.filename, "error": "File too large"})
-            continue
-        try:
-            pil_image = Image.open(io.BytesIO(data)).convert("RGB")
-        except Exception:
-            results.append({"filename": upload.filename, "error": "Invalid image"})
-            continue
-        try:
-            prompt = build_prompt(mode=mode, tone=tone, length=length, word_count=word_count)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        try:
-            async with MODEL_LOCK:
-                if MODEL_CACHE["model"] is None:
-                    await anyio.to_thread.run_sync(_load_model)
-            with anyio.fail_after(REQUEST_TIMEOUT_S):
-                caption = await anyio.to_thread.run_sync(
-                    _generate_caption,
-                    pil_image,
-                    prompt,
-                    float(temperature),
-                    float(top_p),
-                    int(max_new_tokens),
-                    None,
-                )
-            results.append({"filename": upload.filename, "caption": caption, "prompt_used": prompt})
-        except RuntimeError as exc:
-            results.append({"filename": upload.filename, "error": str(exc)})
-
-    return {"mode": mode, "results": results}
