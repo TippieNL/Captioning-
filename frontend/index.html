@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JoyCaption Beta One</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="bg-slate-950 text-slate-100 min-h-screen">
+    <div class="max-w-5xl mx-auto p-6 space-y-6">
+      <header class="space-y-2">
+        <h1 class="text-3xl font-semibold">JoyCaption Beta One</h1>
+        <p class="text-slate-300">Local-first image captioning powered by fancyfeast/llama-joycaption-beta-one-hf-llava.</p>
+      </header>
+
+      <section class="grid gap-6 lg:grid-cols-2">
+        <div class="space-y-4">
+          <div
+            id="dropzone"
+            class="border-2 border-dashed border-slate-700 rounded-lg p-6 text-center bg-slate-900/40"
+          >
+            <p class="font-medium">Drag & drop an image</p>
+            <p class="text-sm text-slate-400">or click to browse</p>
+            <input id="fileInput" type="file" accept="image/*" class="hidden" />
+          </div>
+          <div class="bg-slate-900/60 rounded-lg p-4 space-y-3">
+            <div class="text-sm text-slate-400">Preview</div>
+            <img id="preview" alt="Preview" class="rounded-md hidden" />
+            <p id="previewHint" class="text-sm text-slate-500">No image selected.</p>
+          </div>
+        </div>
+
+        <div class="space-y-4">
+          <div class="bg-slate-900/60 rounded-lg p-4 space-y-4">
+            <div>
+              <label class="block text-sm text-slate-300 mb-1">Mode</label>
+              <select id="mode" class="w-full rounded bg-slate-800 border border-slate-700 p-2">
+                <option value="descriptive_long">Descriptive: long detailed</option>
+                <option value="descriptive_word_count">Descriptive: word count limit</option>
+                <option value="descriptive_length_tone">Descriptive: length + tone</option>
+                <option value="straightforward">Straightforward caption</option>
+                <option value="tags">Tags list</option>
+                <option value="creative_prompt">Creative text-to-image prompt</option>
+              </select>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm text-slate-300 mb-1">Tone</label>
+                <select id="tone" class="w-full rounded bg-slate-800 border border-slate-700 p-2">
+                  <option value="">None</option>
+                  <option value="formal">Formal</option>
+                  <option value="casual">Casual</option>
+                  <option value="neutral">Neutral</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm text-slate-300 mb-1">Length</label>
+                <select id="length" class="w-full rounded bg-slate-800 border border-slate-700 p-2">
+                  <option value="">None</option>
+                  <option value="short">Short</option>
+                  <option value="medium">Medium</option>
+                  <option value="long">Long</option>
+                </select>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm text-slate-300 mb-1">Word count</label>
+                <input id="wordCount" type="number" min="1" max="500" placeholder="Optional"
+                  class="w-full rounded bg-slate-800 border border-slate-700 p-2" />
+              </div>
+              <div>
+                <label class="block text-sm text-slate-300 mb-1">Seed</label>
+                <input id="seed" type="number" placeholder="Optional"
+                  class="w-full rounded bg-slate-800 border border-slate-700 p-2" />
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-3">
+              <div>
+                <label class="block text-sm text-slate-300 mb-1">Temperature</label>
+                <input id="temperature" type="number" step="0.1" value="0.6"
+                  class="w-full rounded bg-slate-800 border border-slate-700 p-2" />
+              </div>
+              <div>
+                <label class="block text-sm text-slate-300 mb-1">Top P</label>
+                <input id="topP" type="number" step="0.05" value="0.9"
+                  class="w-full rounded bg-slate-800 border border-slate-700 p-2" />
+              </div>
+              <div>
+                <label class="block text-sm text-slate-300 mb-1">Max tokens</label>
+                <input id="maxTokens" type="number" value="512"
+                  class="w-full rounded bg-slate-800 border border-slate-700 p-2" />
+              </div>
+            </div>
+            <button
+              id="generateBtn"
+              class="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold py-2 rounded"
+            >
+              Generate caption
+            </button>
+            <p id="status" class="text-sm text-slate-400"></p>
+          </div>
+        </div>
+      </section>
+
+      <section class="bg-slate-900/60 rounded-lg p-4 space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-semibold">Output</h2>
+          <div class="space-x-2">
+            <button id="copyBtn" class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600">Copy</button>
+            <button id="downloadBtn" class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600">Download .txt</button>
+          </div>
+        </div>
+        <pre id="output" class="whitespace-pre-wrap text-sm text-slate-100"></pre>
+      </section>
+    </div>
+
+    <script>
+      const dropzone = document.getElementById('dropzone');
+      const fileInput = document.getElementById('fileInput');
+      const preview = document.getElementById('preview');
+      const previewHint = document.getElementById('previewHint');
+      const status = document.getElementById('status');
+      const output = document.getElementById('output');
+
+      let currentFile = null;
+
+      dropzone.addEventListener('click', () => fileInput.click());
+      dropzone.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        dropzone.classList.add('border-emerald-400');
+      });
+      dropzone.addEventListener('dragleave', () => dropzone.classList.remove('border-emerald-400'));
+      dropzone.addEventListener('drop', (event) => {
+        event.preventDefault();
+        dropzone.classList.remove('border-emerald-400');
+        const [file] = event.dataTransfer.files;
+        if (file) {
+          handleFile(file);
+        }
+      });
+      fileInput.addEventListener('change', (event) => {
+        const [file] = event.target.files;
+        if (file) {
+          handleFile(file);
+        }
+      });
+
+      function handleFile(file) {
+        currentFile = file;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          preview.src = e.target.result;
+          preview.classList.remove('hidden');
+          previewHint.classList.add('hidden');
+        };
+        reader.readAsDataURL(file);
+      }
+
+      async function generateCaption() {
+        if (!currentFile) {
+          status.textContent = 'Please upload an image first.';
+          return;
+        }
+        status.textContent = 'Generating caption...';
+        output.textContent = '';
+
+        const formData = new FormData();
+        formData.append('image', currentFile);
+        formData.append('mode', document.getElementById('mode').value);
+
+        const tone = document.getElementById('tone').value;
+        const length = document.getElementById('length').value;
+        const wordCount = document.getElementById('wordCount').value;
+        const seed = document.getElementById('seed').value;
+
+        if (tone) formData.append('tone', tone);
+        if (length) formData.append('length', length);
+        if (wordCount) formData.append('word_count', wordCount);
+        if (seed) formData.append('seed', seed);
+
+        formData.append('temperature', document.getElementById('temperature').value || '0.6');
+        formData.append('top_p', document.getElementById('topP').value || '0.9');
+        formData.append('max_new_tokens', document.getElementById('maxTokens').value || '512');
+
+        try {
+          const response = await fetch('http://localhost:8000/api/caption', {
+            method: 'POST',
+            body: formData,
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            status.textContent = data.detail || 'Request failed.';
+            return;
+          }
+          output.textContent = data.caption;
+          status.textContent = `Done in ${data.timing_ms}ms`;
+        } catch (error) {
+          status.textContent = 'Failed to reach backend.';
+        }
+      }
+
+      document.getElementById('generateBtn').addEventListener('click', generateCaption);
+
+      document.getElementById('copyBtn').addEventListener('click', async () => {
+        if (!output.textContent) return;
+        await navigator.clipboard.writeText(output.textContent);
+      });
+
+      document.getElementById('downloadBtn').addEventListener('click', () => {
+        if (!output.textContent) return;
+        const blob = new Blob([output.textContent], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'caption.txt';
+        link.click();
+        URL.revokeObjectURL(url);
+      });
+    </script>
+  </body>
+</html>
